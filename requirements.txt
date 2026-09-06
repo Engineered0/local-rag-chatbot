@@ -1,0 +1,7 @@
+chromadb
+sentence-transformers
+ollama
+pdfplumber
+pypdf
+pytesseract
+pdf2image
