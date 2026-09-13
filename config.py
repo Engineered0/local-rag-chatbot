@@ -1,4 +1,6 @@
 EMBED_MODEL = "nomic-embed-text"
 CHAT_MODEL = "llama3.2:3b"
-N_RESULTS = 5
+VISION_MODEL = "moondream"
+
+N_RESULTS = 6
 CHUNK_SIZE = 400
