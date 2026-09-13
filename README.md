@@ -1,129 +1,197 @@
 # Local RAG Chatbot
 
-Ask questions about your own PDFs. Everything runs on your machine — no API keys, no cloud, no data leaving the laptop.
+Ask questions about your own documents. Everything runs on your computer — no API keys, no accounts, nothing sent to the internet.
 
-Built without LangChain, deliberately. The whole pipeline is about 120 lines of plain Python, which means every failure is debuggable in one print statement.
-
----
-
-## Pipeline
-
-```mermaid
-flowchart TD
-    subgraph ingest["ingest.py — run once per document"]
-        A["docs/<br/>PDF · TXT · MD"] --> B["pdfplumber<br/>text + table extraction"]
-        B --> C{"text found?"}
-        C -->|yes| E["paragraph-aware chunking<br/>~400 words, 1-para overlap"]
-        C -->|no| D["Tesseract OCR<br/>300 DPI"]
-        D --> E
-        E --> F["junk filter<br/>drops TOC + stubs"]
-        F --> G["all-MiniLM-L6-v2<br/>384-dim vectors"]
-        G --> H[("ChromaDB<br/>on disk")]
-    end
-
-    subgraph query["rag.py — every question"]
-        I["question"] --> J["all-MiniLM-L6-v2<br/>same model"]
-        J --> K["cosine similarity<br/>top 5 chunks"]
-        K --> L["prompt assembly<br/>context + question"]
-        L --> M["Llama 3.2 3B<br/>via Ollama"]
-        M --> N["answer<br/>+ page citations"]
-    end
-
-    H --> K
-```
-
-The two halves share one thing: the embedding model. It must be identical on both sides, or the vectors aren't comparable and search returns confident nonsense.
+Drop PDFs, images, or Word files into a folder, run two commands, and start asking questions. Answers come back with the file name and page number they came from.
 
 ---
 
-## Stack
+## What problem this solves
 
-| Layer | Tool | Runs |
-|---|---|---|
-| PDF extraction | pdfplumber | local |
-| OCR fallback | Tesseract | local |
-| Embeddings | sentence-transformers (MiniLM) | local |
-| Vector store | ChromaDB | local, persisted to disk |
-| Generation | Ollama + Llama 3.2 3B | local |
+An AI model knows what it was trained on. It doesn't know what's in your PDFs.
 
----
+You could paste a document into a chat window, but that stops working on a 200-page manual. This finds the relevant few paragraphs first and only sends those.
 
-## Setup
-
-Requires Python 3.9+ and [Ollama](https://ollama.com).
-
-```bash
-brew install ollama tesseract poppler
-ollama pull llama3.2:3b
-
-git clone <your-repo-url> && cd ragbot
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-```
-
----
-
-## Usage
-
-Start Ollama in its own terminal:
-
-```bash
-ollama serve
-```
-
-Drop documents into `docs/`, then:
-
-```bash
-python ingest.py     # chunk, embed, store
-python rag.py        # ask questions
-```
-
-`ingest.py` uses `upsert`, so re-running it updates existing chunks instead of duplicating them.
+That approach is called RAG — retrieval-augmented generation. Retrieve the right text, then generate an answer from it.
 
 ---
 
 ## How it works
 
-**Chunking.** Documents are split on paragraph boundaries rather than fixed word counts. Fixed-width splitting cuts code blocks and tables in half, and a chunk containing half a code example matches poorly and answers worse.
+```mermaid
+flowchart TD
+    subgraph ingest["Step 1 — ingest.py, run once per file"]
+        A["Your documents<br/>PDF · images · Word · text"] --> B["Pull out the text<br/>including tables and OCR"]
+        B --> C["Cut into chunks<br/>~400 words each"]
+        C --> D["Turn each chunk into numbers<br/>nomic-embed-text"]
+        D --> E[("Save to ChromaDB<br/>a folder on your disk")]
+    end
 
-**Embeddings.** Each chunk becomes 384 numbers representing its meaning. Text about similar things lands in similar coordinates, so "how do plants make food" retrieves a paragraph about photosynthesis despite sharing no words with it. This is why keyword search isn't enough.
+    subgraph query["Step 2 — rag.py, every question"]
+        F["Your question"] --> G["Turn it into numbers<br/>same model"]
+        G --> H["Find the 6 closest chunks"]
+        H --> I["Paste them into a prompt"]
+        I --> J["Llama 3.2 writes the answer<br/>with page citations"]
+    end
 
-**Junk filtering.** Table-of-contents pages are dot-leader noise that matches every query weakly and crowds out real matches. Chunks that are mostly punctuation or under 20 words get dropped at ingest.
+    E --> H
+```
 
-**Retrieval.** The question is embedded with the same model and compared against stored vectors by cosine similarity. The top 5 come back with their source file and page number.
+**In plain words:**
 
-**Generation.** Retrieved chunks are pasted into a prompt above the question. The model is instructed to answer only from that context and to say `Not in the documents.` otherwise. It never touches the database — it just receives a question with the answer already attached.
+Your documents get chopped into small pieces. Each piece is converted into a list of numbers that represents its meaning — similar text gets similar numbers. Those go in a database on your disk.
 
----
+When you ask something, your question gets converted the same way, and the database finds the pieces whose numbers are closest. Those pieces get pasted into a prompt, and a local model reads them and writes an answer.
 
-## Debugging
-
-`rag.py` prints retrieved chunks and their distance scores before the answer. This narrows every failure to one of two causes:
-
-- **Right chunk missing** → retrieval problem. Adjust chunk size, `n_results`, or the junk filter.
-- **Right chunk present, answer wrong** → generation problem. Tighten the prompt or use a larger model.
-
-Those need opposite fixes. Without the print, you're guessing.
-
-Distance above ~1.0 means a weak match — usually a sign nothing relevant exists in the corpus.
-
----
-
-## Limitations
-
-Answers inherit the age of the source documents. Retrieval will faithfully return a deprecated API call if that's what the PDF says.
-
-Diagram-only pages (schematics, connector drawings) can't be parsed into text. They're stored as pointers telling you which page to open manually rather than guessed at.
-
-A 3B model follows the context-only instruction less reliably than a larger one. Swapping to `qwen2.5:7b` in `rag.py` improves this if you have the RAM.
-
-Semantic search is weak on exact strings — part numbers, error codes, pin numbers. Hybrid keyword search would help and isn't implemented.
+The model never searches anything. It just receives a question with the relevant text already attached.
 
 ---
 
-## Possible next steps
+## What it can read
 
-- Reranking: retrieve 15, score with a cross-encoder, keep the best 4
-- Hybrid search (BM25 + vector) for exact-match terms
-- A held-out question set to measure retrieval changes instead of eyeballing them
-- Streamlit UI for uploads and chat
+| You put in | What happens |
+|---|---|
+| PDF with text | Text and tables extracted directly |
+| PDF with figures | Tesseract reads text inside the images |
+| PDF page that's pure image | A vision model describes it |
+| `.jpg`, `.png`, other images | OCR first, then a description |
+| `.docx` | Paragraphs and tables |
+| `.txt`, `.md`, `.csv` | Read as-is |
+
+Tables get flattened into sentences like `Model: CAM-CIC-5000, Resolution: 5MP` — because the search works on words, not columns.
+
+---
+
+## Setup
+
+You need a Mac or Linux machine, Python 3.9+, and about 5 GB of disk space.
+
+**1. Install the tools**
+
+```bash
+brew install ollama tesseract poppler
+```
+
+**2. Download the models**
+
+```bash
+ollama pull nomic-embed-text   # turns text into numbers  (274 MB)
+ollama pull llama3.2:3b        # writes the answers       (2 GB)
+ollama pull moondream          # describes images         (1.7 GB)
+```
+
+**3. Get the code**
+
+```bash
+git clone https://github.com/Engineered0/local-rag-chatbot.git
+cd local-rag-chatbot
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+---
+
+## Using it
+
+Open a terminal and start Ollama. Leave this one running:
+
+```bash
+ollama serve
+```
+
+In a second terminal, put some documents in `docs/`, then:
+
+```bash
+python ingest.py    # reads your files — takes a minute
+python rag.py       # ask questions
+```
+
+Type `quit` to exit.
+
+**Two extra commands inside `rag.py`:**
+
+```
+/files                        list your documents
+@manual.pdf what is the FOV   search one file only
+```
+
+**Adding more documents later:** drop them in `docs/` and run `python ingest.py` again. Files it has already read are skipped, so only the new ones get processed.
+
+---
+
+## Reading the output
+
+Before each answer, it prints the chunks it found:
+
+```
+--- retrieved ---
+[manual.pdf p12 table] dist=0.31
+Model: CAM-CIC-5000, Resolution: 5MP ...
+```
+
+- **p12** — the page it came from
+- **table** — how the text was extracted (`text`, `table`, `ocr`, `vision`)
+- **dist** — how close the match was. Lower is better. Above 1.0 usually means nothing relevant was found.
+
+This printout is the most useful part of the whole tool. If the answer is wrong, look here first:
+
+**The right chunk isn't listed** → the search failed. Try wording the question with terms that appear in the document, or raise `N_RESULTS` in `config.py`.
+
+**The right chunk is listed but the answer is wrong** → the model failed. Tighten the prompt in `rag.py`, or use a bigger chat model.
+
+Those are two completely different fixes, and you can't tell them apart without looking.
+
+---
+
+## The files
+
+```
+config.py      model names and settings — change things here
+embedder.py    turns text into numbers
+describe.py    OCR and image descriptions
+ingest.py      reads your documents into the database
+rag.py         asks questions
+docs/          put your documents here
+chroma_db/     the database (created automatically)
+```
+
+**Changing models.** All model names live in `config.py`.
+
+Swapping the chat model (`CHAT_MODEL`) is free — edit the line and run.
+
+Swapping the embedding model (`EMBED_MODEL`) means the saved numbers no longer match, so you have to rebuild:
+
+```bash
+rm -rf chroma_db .ingest_cache.json
+python ingest.py
+```
+
+---
+
+## Things to know before trusting it
+
+**Answers are only as current as your documents.** This once returned a working OpenCV code snippet containing a deprecated function — because the PDF was from 2019. It wasn't making anything up. The source was just old.
+
+**Image descriptions are for finding things, not for facts.** The vision model writes fluent descriptions and sometimes adds details that aren't in the picture. Good enough to make an image searchable. Not good enough to rely on.
+
+**Schematics don't work, and that's deliberate.** Pinout drawings and wiring diagrams depend on which line touches which pin, and small vision models get that wrong while sounding confident. Rather than guess, the tool tells you which page to open. For anything you're going to physically wire, that's the right answer.
+
+**Similar documents can get confused.** With several datasheets loaded, "what's the resolution" matches all of them. Name the model in your question, or use `@filename`.
+
+---
+
+## Ideas for later
+
+- **Reranking** — fetch 15 chunks, score them more carefully, keep the best 4. Probably the biggest remaining improvement.
+- **Keyword search alongside the vector search** — helps with exact strings like part numbers, where meaning-based search is weak.
+- **A web interface** with Streamlit, instead of the terminal.
+- **A set of test questions** with known answers, so changes can be measured instead of guessed at.
+
+---
+
+## Why there's no LangChain
+
+LangChain would have saved maybe 40 lines. The cost is a large dependency tree and abstractions sitting between you and the thing going wrong.
+
+Writing it directly meant that when retrieval returned nonsense, the fix was one print statement away. For a project whose point was understanding how RAG works, that was the whole value.
