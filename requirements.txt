@@ -1,5 +1,4 @@
 chromadb
-sentence-transformers
 ollama
 pdfplumber
 pypdf

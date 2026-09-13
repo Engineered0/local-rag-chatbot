@@ -1,37 +1,34 @@
 import os, chromadb, pdfplumber, pytesseract
 from pdf2image import convert_from_path
-from sentence_transformers import SentenceTransformer
+from config import CHUNK_SIZE
+from embedder import embed
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DOCS = f"{BASE}/docs"
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
 col = chromadb.PersistentClient(f"{BASE}/chroma_db").get_or_create_collection("docs")
 
 
 def is_junk(text):
-    """Table-of-contents lines and stubs match everything weakly."""
     if len(text.split()) < 20:
         return True
     return text.count(".") > len(text) * 0.15
 
 
-def chunk_text(text, size=400):
-    """Split on paragraph boundaries so code blocks stay intact."""
+def chunk_text(text, size=CHUNK_SIZE):
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks, cur = [], []
     for p in paras:
         cur.append(p)
         if sum(len(x.split()) for x in cur) >= size:
             chunks.append("\n\n".join(cur))
-            cur = cur[-1:]                # carry last para as overlap
+            cur = cur[-1:]
     if cur:
         chunks.append("\n\n".join(cur))
     return chunks
 
 
 def flatten_table(table, name, page):
-    """One self-contained line per table row."""
     out = []
     header = [str(c or "").strip() for c in table[0]]
     for row in table[1:]:
@@ -90,10 +87,17 @@ for name in sorted(os.listdir(DOCS)):
         continue
 
     texts = [r[0] for r in records]
+
+    # embed in batches so a big file doesn't stall
+    vectors = []
+    for i in range(0, len(texts), 32):
+        vectors.extend(embed(texts[i:i+32]))
+        print(f"  {min(i+32, len(texts))}/{len(texts)}", end="\r")
+
     col.upsert(
         ids=[f"{name}-p{r[1]}-{r[2]}-{i}" for i, r in enumerate(records)],
         documents=texts,
-        embeddings=model.encode(texts, show_progress_bar=True).tolist(),
+        embeddings=vectors,
         metadatas=[{"source": name, "page": r[1], "kind": r[2]} for r in records],
     )
 

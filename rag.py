@@ -1,18 +1,14 @@
 import os, chromadb, ollama
-from sentence_transformers import SentenceTransformer
+from config import CHAT_MODEL, N_RESULTS
+from embedder import embed
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-
-MODEL = "llama3.2:3b"
-N_RESULTS = 5
-
-model = SentenceTransformer("all-MiniLM-L6-v2")
 col = chromadb.PersistentClient(f"{BASE}/chroma_db").get_or_create_collection("docs")
 
 
-def ask(question, show_chunks=True):
+def ask(question):
     res = col.query(
-        query_embeddings=model.encode([question]).tolist(),
+        query_embeddings=embed([question]),
         n_results=N_RESULTS,
     )
     chunks = res["documents"][0]
@@ -23,11 +19,10 @@ def ask(question, show_chunks=True):
         print("nothing in the database — run ingest.py first")
         return
 
-    if show_chunks:
-        print("\n--- retrieved ---")
-        for c, m, d in zip(chunks, metas, dists):
-            print(f"[{m['source']} p{m['page']} {m['kind']}] dist={d:.3f}")
-            print(c[:250].replace("\n", " "), "\n")
+    print("\n--- retrieved ---")
+    for c, m, d in zip(chunks, metas, dists):
+        print(f"[{m['source']} p{m['page']} {m['kind']}] dist={d:.3f}")
+        print(c[:250].replace("\n", " "), "\n")
 
     if dists[0] > 1.0:
         print("weak match — the answer may not be in your documents\n")
@@ -45,7 +40,7 @@ def ask(question, show_chunks=True):
     )
 
     reply = ollama.chat(
-        model=MODEL,
+        model=CHAT_MODEL,
         messages=[{"role": "user", "content": prompt}],
     )["message"]["content"]
 
